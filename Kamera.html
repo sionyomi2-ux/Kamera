@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Tactical Multi-Scanner</title>
+  <style>
+    body { font-family: 'Courier New', monospace; margin: 0; background: #000; overflow: hidden; color: #0f0; }
+    #video-container { position: relative; width: 100vw; height: 100vh; }
+    video { width: 100%; height: 100%; object-fit: cover; filter: brightness(0.6) contrast(1.2) sepia(0.3); }
+    canvas { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+    
+    /* グリッドと走査線 */
+    #overlay {
+      position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+      pointer-events: none;
+      background: radial-gradient(circle, transparent 20%, rgba(0,20,0,0.4) 100%),
+                  repeating-linear-gradient(0deg, rgba(0,255,0,0.05) 0px, rgba(0,255,0,0.05) 1px, transparent 1px, transparent 2px);
+    }
+  </style>
+</head>
+<body>
+
+  <div id="video-container">
+    <video id="webcam" autoplay playsinline></video>
+    <canvas id="output_canvas"></canvas>
+    <div id="overlay"></div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.2"></script>
+
+  <script type="module">
+    import { ObjectDetector, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.2";
+
+    const video = document.getElementById("webcam");
+    const canvasElement = document.getElementById("output_canvas");
+    const canvasCtx = canvasElement.getContext("2d");
+    let objectDetector;
+
+    async function init() {
+      const vision = await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.2/wasm");
+      objectDetector = await ObjectDetector.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath: `https://storage.googleapis.com/mediapipe-models/object_detector/efficientdet_lite0/float16/1/efficientdet_lite0.tflite`,
+          delegate: "GPU"
+        },
+        scoreThreshold: 0.3,
+        runningMode: "VIDEO"
+      });
+      startCamera();
+    }
+
+    async function startCamera() {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      video.srcObject = stream;
+      video.addEventListener("loadeddata", predict);
+    }
+
+    function drawTarget(x, y, w, h, isLocked, label) {
+      const color = isLocked ? "#0f0" : "#f00";
+      canvasCtx.strokeStyle = color;
+      canvasCtx.fillStyle = color;
+      canvasCtx.lineWidth = 2;
+
+      // 1. コーナーブラケット（カッコ）
+      const l = 15;
+      canvasCtx.beginPath();
+      canvasCtx.moveTo(x, y + l); canvasCtx.lineTo(x, y); canvasCtx.lineTo(x + l, y);
+      canvasCtx.moveTo(x + w - l, y); canvasCtx.lineTo(x + w, y); canvasCtx.lineTo(x + w, y + l);
+      canvasCtx.moveTo(x + w, y + h - l); canvasCtx.lineTo(x + w, y + h); canvasCtx.lineTo(x + w - l, y + h);
+      canvasCtx.moveTo(x + l, y + h); canvasCtx.lineTo(x, y + h); canvasCtx.lineTo(x, y + h - l);
+      canvasCtx.stroke();
+
+      // 2. ロックオン用クロスヘア
+      if (isLocked) {
+        canvasCtx.beginPath();
+        canvasCtx.moveTo(x + w/2, y - 5); canvasCtx.lineTo(x + w/2, y + 5);
+        canvasCtx.moveTo(x + w/2, y + h - 5); canvasCtx.lineTo(x + w/2, y + h + 5);
+        canvasCtx.moveTo(x - 5, y + h/2); canvasCtx.lineTo(x + 5, y + h/2);
+        canvasCtx.moveTo(x + w - 5, y + h/2); canvasCtx.lineTo(x + w + 5, y + h/2);
+        canvasCtx.stroke();
+      }
+
+      // 3. テキストインフォ
+      canvasCtx.font = "bold 10px monospace";
+      const status = isLocked ? "LOCKED" : "SEARCHING...";
+      canvasCtx.fillText(`[${status}]`, x, y - 25);
+      canvasCtx.fillText(`TYPE: ${label.toUpperCase()}`, x, y - 10);
+      
+      if (isLocked) {
+        canvasCtx.font = "8px monospace";
+        canvasCtx.fillText(`POS_X: ${Math.floor(x)}`, x + w + 5, y + 10);
+        canvasCtx.fillText(`POS_Y: ${Math.floor(y)}`, x + w + 5, y + 20);
+        canvasCtx.fillText(`MASS: ${Math.floor(w * h / 100)} unit`, x + w + 5, y + 30);
+      }
+    }
+
+    async function predict() {
+      canvasElement.width = video.videoWidth;
+      canvasElement.height = video.videoHeight;
+      const results = await objectDetector.detectForVideo(video, performance.now());
+
+      canvasCtx.clearRect(0, 0, canvasElement.width, canvasElement.height);
+
+      results.detections.forEach(det => {
+        const { originX, originY, width, height } = det.boundingBox;
+        const score = det.categories[0].score;
+        const label = det.categories[0].categoryName;
+
+        // スコアが0.5以上なら「LOCKED（緑）」、以下なら「SEARCHING（赤）」
+        drawTarget(originX, originY, width, height, score > 0.5, label);
+      });
+
+      requestAnimationFrame(predict);
+    }
+
+    init();
+  </script>
+</body>
+</html>
